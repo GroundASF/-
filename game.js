@@ -167,7 +167,7 @@ const CULTIVATION_TYPES = {
 const CULTIVATION_EFFECTS = {
     [CULTIVATION_TYPES.ELEMENT_MASTER]: {
         name: '元素御仙',
-        description: '开局选择1种属性，后续该属性成功造成伤害（未被完全防御）时，额外+1伤害',
+        description: '开局选择1种属性，后续该属性成功造成伤害（未被完全防御）时，额外+2伤害',
         needsElementChoice: true
     },
     [CULTIVATION_TYPES.FIVE_ELEMENT_ARRAY]: {
@@ -191,9 +191,9 @@ const CULTIVATION_EFFECTS = {
     },
     [CULTIVATION_TYPES.SPIRIT_THIEF]: {
         name: '窃灵天官',
-        description: '每局拥有3个仙术点，行动前可消耗1个仙术点抽取对手1张灵牌',
-        skillPoints: 3,
-        specialAbility: 'steal_card'
+        description: '每4个回合自动偷窃对方一张牌',
+        specialAbility: 'steal_card_passive',
+        passiveCooldown: 4
     },
     [CULTIVATION_TYPES.MYSTIC_WOOD_HEALER]: {
         name: '玄木药师',
@@ -203,15 +203,17 @@ const CULTIVATION_EFFECTS = {
     },
     [CULTIVATION_TYPES.BURNING_SKY_CULTIVATOR]: {
         name: '焚天修士',
-        description: '每局拥有三个仙术点，行动前可消耗一个仙术点将手牌中所有同属性灵牌一次性打出进行攻击',
-        skillPoints: 3,
+        description: '每局拥有四个仙术点，行动前可消耗一个仙术点将手牌中所有同属性灵牌一次性打出进行攻击',
+        skillPoints: 4,
         specialAbility: 'mass_attack'
     },
     [CULTIVATION_TYPES.SHIELD_GUARDIAN]: {
         name: '罡盾卫道者',
-        description: '可消耗手牌中任意两张灵牌，生成1层「罡盾」。最多可叠加3层，每层抵消1点伤害',
-        specialAbility: 'shield_generation',
-        maxShields: 3
+        description: '开局提供两层罡盾，每三个回合后增加一层罡盾，当罡盾层数到达三层时暂停增加，罡盾小于等于2时继续倒计时',
+        specialAbility: 'shield_passive',
+        maxShields: 3,
+        initialShields: 2,
+        shieldCooldown: 3
     }
 };
 
@@ -231,13 +233,31 @@ const BUILDING_TYPES = {
     QINGHUA_SPRING_HALL: 'qinghua_spring_hall'
 };
 
+// AI性格类型
+const AI_PERSONALITIES = {
+    BALANCED: 'balanced',        // 平衡型（原有逻辑）
+    AGGRESSIVE: 'aggressive',    // 攻击型（手牌满时必选攻击）
+    ELEMENT_FOCUSED: 'element_focused', // 元素专注型（选择重复最多的元素）
+    ELEMENT_DIVERSE: 'element_diverse', // 元素多样型（选择共同最少但不为零的元素）
+    VENGEFUL: 'vengeful'         // 记仇型
+};
+
+// AI性格名称映射
+const AI_PERSONALITY_NAMES = {
+    [AI_PERSONALITIES.BALANCED]: '平衡型',
+    [AI_PERSONALITIES.AGGRESSIVE]: '攻击型',
+    [AI_PERSONALITIES.ELEMENT_FOCUSED]: '元素专注型',
+    [AI_PERSONALITIES.ELEMENT_DIVERSE]: '元素多样型',
+    [AI_PERSONALITIES.VENGEFUL]: '记仇型'
+};
+
 // 建筑效果
 const BUILDING_EFFECTS = {
     [BUILDING_TYPES.FIVE_ELEMENT_OBSERVATORY]: {
         name: '五行聚灵观',
         cost: [ELEMENTS.METAL, ELEMENTS.WOOD, ELEMENTS.WATER, ELEMENTS.FIRE, ELEMENTS.EARTH],
-        description: '灵牌上限+1',
-        effect: 'hand_limit_boost',
+        description: '灵牌上限+1（每个建筑独立生效）',
+        effect: 'hand_limit_boost_individual',
         handLimitBonus: 1
     },
     [BUILDING_TYPES.FIRE_BURNING_PAVILION]: {
@@ -286,16 +306,16 @@ const BUILDING_EFFECTS = {
     [BUILDING_TYPES.YIN_YANG_DWELLING]: {
         name: '阴阳盈虚庐',
         cost: 'two_pairs', // 特殊成本格式
-        description: '仙元上限+1',
+        description: '仙元上限+2',
         effect: 'max_energy_boost',
-        maxEnergyBonus: 1
+        maxEnergyBonus: 2
     },
     [BUILDING_TYPES.NINE_TRANSFORMATION_PAVILION]: {
         name: '九转归真阁',
         cost: 'two_quads', // 特殊成本格式
-        description: '仙元上限+3',
+        description: '仙元上限+4',
         effect: 'max_energy_boost_3',
-        maxEnergyBonus: 3,
+        maxEnergyBonus: 4,
         requirement: 'hand_limit_8'
     },
     [BUILDING_TYPES.STAR_OBSERVATORY]: {
@@ -315,10 +335,11 @@ const BUILDING_EFFECTS = {
     [BUILDING_TYPES.QINGHUA_SPRING_HALL]: {
         name: '青华灵泉殿',
         cost: [ELEMENTS.WOOD, ELEMENTS.WOOD, ELEMENTS.WOOD, ELEMENTS.WATER, ELEMENTS.WATER],
-        description: '仙元上限永久增加2点（玄木药师专属）',
-        effect: 'qinghua_special',
-        maxEnergyBonus: 2,
-        exclusive: CULTIVATION_TYPES.MYSTIC_WOOD_HEALER
+        description: '每三个回合恢复一滴血，如果满血则没效果（玄木药师专属，上限2个）',
+        effect: 'qinghua_healing',
+        healingCooldown: 3,
+        exclusive: CULTIVATION_TYPES.MYSTIC_WOOD_HEALER,
+        buildingLimit: 2
     }
 };
 
@@ -331,6 +352,7 @@ class GameState {
         this.currentTurn = null;
         this.turnPhase = 'start';
         this.actionPoints = 1;
+        this.roundNumber = 1; // 回合数（一个回合包含玩家和AI各自的轮次）
         this.gameLog = [];
         this.deck = this.createDeck();
         this.discardPile = [];
@@ -356,13 +378,86 @@ class GameState {
         return shuffled;
     }
 
-    drawCard() {
+    drawCard(player = null) {
         if (this.deck.length === 0) {
             if (this.discardPile.length === 0) return null;
             this.deck = this.shuffleDeck(this.discardPile);
             this.discardPile = [];
         }
-        return this.deck.pop();
+
+        // 如果没有指定玩家，使用原有的随机抽牌逻辑
+        if (!player) {
+            return this.deck.pop();
+        }
+
+        // 动态概率抽牌系统
+        return this.drawCardWithDynamicProbability(player);
+    }
+
+    drawCardWithDynamicProbability(player) {
+        if (this.deck.length === 0) return null;
+
+        // 统计手牌中各元素的数量
+        const handCounts = {};
+        Object.values(ELEMENTS).forEach(element => {
+            handCounts[element] = 0;
+        });
+
+        player.hand.forEach(card => {
+            handCounts[card]++;
+        });
+
+        // 计算动态概率
+        const baseProbability = 0.2; // 每个元素初始20%
+        const probabilities = {};
+        let totalAdjustment = 0;
+
+        Object.values(ELEMENTS).forEach(element => {
+            const count = handCounts[element];
+            // 手牌中元素越多，概率越小；越少，概率越高
+            let adjustment = 0;
+            if (count === 0) {
+                adjustment = 0.1; // 没有的元素增加10%概率
+            } else if (count === 1) {
+                adjustment = 0.05; // 1张的元素增加5%概率
+            } else if (count >= 2) {
+                adjustment = -0.05 * (count - 1); // 2张以上每张减少5%概率
+            }
+
+            probabilities[element] = Math.max(0.05, baseProbability + adjustment); // 最低5%概率
+            totalAdjustment += probabilities[element];
+        });
+
+        // 归一化概率，确保总和为1
+        Object.keys(probabilities).forEach(element => {
+            probabilities[element] = probabilities[element] / totalAdjustment;
+        });
+
+        // 根据概率选择元素
+        const random = Math.random();
+        let cumulative = 0;
+        let selectedElement = null;
+
+        for (const element of Object.values(ELEMENTS)) {
+            cumulative += probabilities[element];
+            if (random <= cumulative) {
+                selectedElement = element;
+                break;
+            }
+        }
+
+        // 从牌堆中找到对应元素的牌
+        const availableCards = this.deck.filter(card => card === selectedElement);
+        if (availableCards.length === 0) {
+            // 如果没有对应元素的牌，随机抽取
+            return this.deck.pop();
+        }
+
+        // 随机选择一张对应元素的牌
+        const cardIndex = this.deck.findIndex(card => card === selectedElement);
+        const drawnCard = this.deck.splice(cardIndex, 1)[0];
+
+        return drawnCard;
     }
 
     addToLog(message) {
@@ -387,6 +482,12 @@ class Player {
         this.shields = 0;
         this.selectedElement = null;
         this.damageBonus = {};
+        this.passiveCounters = {}; // 被动技能计数器
+        this.aiPersonality = null; // AI性格
+        this.vengefulCountdown = 0; // 记仇倒计时
+        this.buildingCounters = {}; // 建筑效果计数器
+        this.lastActionTime = 0; // 上次行动时间
+        this.aiActionCooldown = 0; // AI行动冷却时间
     }
 
     initialize(cultivation, spiritRoot) {
@@ -407,6 +508,9 @@ class Player {
         }
         if (cultivationEffect.skillPoints) {
             this.skillPoints = cultivationEffect.skillPoints;
+        }
+        if (cultivationEffect.initialShields) {
+            this.shields = cultivationEffect.initialShields;
         }
 
         if (spiritRootEffect.energyBonus) {
@@ -440,8 +544,14 @@ class Player {
                 });
             }
             if (effect.handLimitBonus) {
-                this.buildingHandLimitBonus += effect.handLimitBonus;
-                this.handLimit += effect.handLimitBonus;
+                // 五行聚灵观每个建筑独立生效
+                if (effect.effect === 'hand_limit_boost_individual') {
+                    this.buildingHandLimitBonus += effect.handLimitBonus;
+                    this.handLimit += effect.handLimitBonus;
+                } else {
+                    this.buildingHandLimitBonus += effect.handLimitBonus;
+                    this.handLimit += effect.handLimitBonus;
+                }
             }
             if (effect.maxEnergyBonus) {
                 this.buildingMaxEnergyBonus += effect.maxEnergyBonus;
@@ -466,6 +576,14 @@ class Player {
         // 检查建筑上限
         if (this.buildings.length >= this.buildingLimit) {
             return false;
+        }
+
+        // 检查特定建筑的数量限制
+        if (building.buildingLimit) {
+            const existingCount = this.buildings.filter(b => b.type === buildingType).length;
+            if (existingCount >= building.buildingLimit) {
+                return false;
+            }
         }
 
         // 移除相同建筑限制，允许建造多个相同的建筑
@@ -688,7 +806,7 @@ class Player {
     drawCards(count, gameState, ignoreLimit = false) {
         for (let i = 0; i < count; i++) {
             if (!ignoreLimit && this.hand.length >= this.handLimit) break;
-            const card = gameState.drawCard();
+            const card = gameState.drawCard(this); // 传递玩家参数以启用动态概率
             if (card) {
                 this.hand.push(card);
             }
@@ -903,7 +1021,7 @@ class UIController {
         const helpBtn = document.getElementById('help-btn');
         if (helpBtn) {
             helpBtn.addEventListener('click', () => {
-                this.showGameInstructions();
+                this.showGameInstructionsAndFix();
             });
         }
     }
@@ -994,6 +1112,10 @@ class UIController {
             const elements = Object.values(ELEMENTS);
             gameState.ai.selectedElement = elements[Math.floor(Math.random() * elements.length)];
         }
+
+        // 随机分配AI性格
+        const personalities = Object.values(AI_PERSONALITIES);
+        gameState.ai.aiPersonality = personalities[Math.floor(Math.random() * personalities.length)];
 
         // 开局抽牌
         const playerInitialHand = gameState.player.cultivation === CULTIVATION_TYPES.MYSTIC_TREASURY ? 2 : 3;
@@ -1097,8 +1219,8 @@ class UIController {
 
         slotMachine.classList.add('spinning');
 
-        let playerSpeed = 30; // 初始速度（毫秒）- 调整为2秒
-        let aiSpeed = 30;
+        let playerSpeed = 10; // 加快初始速度
+        let aiSpeed = 10;
         let playerPosition = 0;
         let aiPosition = 0;
 
@@ -1108,14 +1230,14 @@ class UIController {
             playerReel.style.transform = `translateY(-${playerPosition}px)`;
 
             // 逐渐减速
-            playerSpeed += 4; // 调整加速度适配2秒
+            playerSpeed += 2; // 减小加速度，更快停止
 
-            if (playerSpeed > 150) { // 调整停止阈值适配2秒
+            if (playerSpeed > 50) { // 更快停止
                 clearInterval(playerInterval);
                 // 停在最终位置
                 const finalPosition = (playerReel.children.length - 1) * 120;
                 playerReel.style.transform = `translateY(-${finalPosition}px)`;
-                playerReel.style.transition = 'transform 0.5s ease-out';
+                playerReel.style.transition = 'transform 0.2s ease-out';
             }
         }, playerSpeed);
 
@@ -1124,18 +1246,18 @@ class UIController {
             aiPosition += 120;
             aiReel.style.transform = `translateY(-${aiPosition}px)`;
 
-            aiSpeed += 4; // 调整加速度适配2秒
+            aiSpeed += 2; // 减小加速度，更快停止
 
-            if (aiSpeed > 180) { // AI稍晚停止，适配2秒
+            if (aiSpeed > 60) { // AI稍晚停止，但也更快
                 clearInterval(aiInterval);
                 const finalPosition = (aiReel.children.length - 1) * 120;
                 aiReel.style.transform = `translateY(-${finalPosition}px)`;
-                aiReel.style.transition = 'transform 0.5s ease-out';
+                aiReel.style.transition = 'transform 0.2s ease-out';
 
                 // 动画结束后显示结果
                 setTimeout(() => {
                     this.showSlotResults();
-                }, 300); // 适配2秒总时长
+                }, 100); // 减少等待时间
             }
         }, aiSpeed);
     }
@@ -1195,7 +1317,7 @@ class UIController {
         // 自动开始先后手决定
         setTimeout(() => {
             this.startTurnOrderDetermination();
-        }, 1000);
+        }, 300); // 减少等待时间从1000ms到300ms
     }
 
     startTurnOrderDetermination() {
@@ -1225,7 +1347,7 @@ class UIController {
                 } else {
                     drawCards();
                 }
-            }, 800);
+            }, 200); // 减少等待时间从800ms到200ms
         };
 
         drawCards();
@@ -1555,6 +1677,7 @@ class UIController {
         this.updatePlayerInfo();
         this.updateAIInfo();
         this.updateGameStatus();
+        this.updatePassiveProgress();
         this.updateActionButtons();
     }
 
@@ -1685,6 +1808,12 @@ class UIController {
             console.warn('ai-spirit-root element not found');
         }
 
+        const personalityPrefixEl = document.getElementById('ai-personality-prefix');
+        if (personalityPrefixEl && ai.aiPersonality) {
+            personalityPrefixEl.textContent = (AI_PERSONALITY_NAMES[ai.aiPersonality] || '未知') + '的';
+            console.log('Updated AI personality:', AI_PERSONALITY_NAMES[ai.aiPersonality]);
+        }
+
         const energyEl = document.getElementById('ai-energy');
         const maxEnergyEl = document.getElementById('ai-max-energy');
         if (energyEl && maxEnergyEl) {
@@ -1735,7 +1864,7 @@ class UIController {
     updateGameStatus() {
         const currentTurnEl = document.getElementById('current-turn');
         if (currentTurnEl) {
-            currentTurnEl.textContent = `当前回合：${gameState.currentTurn === 'player' ? '玩家' : 'AI'}`;
+            currentTurnEl.textContent = `第${gameState.roundNumber}回合 - ${gameState.currentTurn === 'player' ? '玩家轮次' : 'AI轮次'}`;
         }
 
         const actionPointsEl = document.getElementById('action-points');
@@ -1801,67 +1930,12 @@ class UIController {
     }
 
     animateCardsFlying(cards, playerName, targetContainer) {
-        const isPlayer = playerName === '玩家';
-        const sourceSelector = isPlayer ? '#player-info' : '#ai-info';
-        const sourceElement = document.querySelector(sourceSelector);
-
-        if (!sourceElement) return;
-
-        const sourceRect = sourceElement.getBoundingClientRect();
-        const playedArea = document.getElementById('played-cards-area');
-        const playedAreaRect = playedArea.getBoundingClientRect();
-
+        // 取消飞行动画，直接显示卡牌
         cards.forEach((card, index) => {
-            setTimeout(() => {
-                // 创建飞行的卡牌元素
-                const flyingCard = document.createElement('div');
-                flyingCard.className = `card-flying element-${card}`;
-                flyingCard.textContent = ELEMENT_INFO[card].symbol;
-
-                // 设置初始位置和样式
-                flyingCard.style.cssText = `
-                    position: fixed;
-                    width: 50px;
-                    height: 50px;
-                    border-radius: 8px;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    font-weight: bold;
-                    font-size: 16px;
-                    border: 2px solid;
-                    z-index: 1000;
-                    pointer-events: none;
-                    left: ${sourceRect.left + sourceRect.width / 2 - 25}px;
-                    top: ${sourceRect.top + sourceRect.height / 2 - 25}px;
-                    transition: all 0.8s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-                    box-shadow: 0 4px 15px rgba(0, 0, 0, 0.3);
-                `;
-
-                document.body.appendChild(flyingCard);
-
-                // 计算目标位置（打出牌区域的中心附近）
-                const targetX = playedAreaRect.left + playedAreaRect.width / 2 - 25 + (index - cards.length / 2) * 60;
-                const targetY = playedAreaRect.top + playedAreaRect.height / 2 - 25;
-
-                // 开始飞行动画
-                requestAnimationFrame(() => {
-                    flyingCard.style.left = `${targetX}px`;
-                    flyingCard.style.top = `${targetY}px`;
-                    flyingCard.style.transform = 'scale(0.8) rotate(360deg)';
-                });
-
-                // 动画结束后显示目标卡牌并移除飞行卡牌
-                setTimeout(() => {
-                    const targetCard = targetContainer.children[index];
-                    if (targetCard) {
-                        targetCard.style.opacity = '1';
-                        targetCard.style.animation = 'cardFlyIn 0.4s ease-out';
-                    }
-                    flyingCard.remove();
-                }, 850);
-
-            }, index * 150); // 每张卡牌延迟150ms
+            const targetCard = targetContainer.children[index];
+            if (targetCard) {
+                targetCard.style.opacity = '1';
+            }
         });
     }
 
@@ -1903,6 +1977,12 @@ class UIController {
     }
 
     renderPlayerBuildings() {
+        // 更新仙府数量显示
+        const buildingCountEl = document.getElementById('player-building-count');
+        if (buildingCountEl) {
+            buildingCountEl.textContent = `(${gameState.player.buildings.length}/${gameState.player.buildingLimit})`;
+        }
+
         // 更新玩家建筑槽位，不显示空的仙府
         for (let i = 0; i < 5; i++) {
             const slot = document.getElementById(`player-building-slot-${i}`);
@@ -1922,6 +2002,12 @@ class UIController {
     }
 
     renderAIBuildings() {
+        // 更新AI仙府数量显示
+        const aiBuildingCountEl = document.getElementById('ai-building-count');
+        if (aiBuildingCountEl) {
+            aiBuildingCountEl.textContent = `(${gameState.ai.buildings.length}/${gameState.ai.buildingLimit})`;
+        }
+
         // 更新AI建筑槽位，不显示空的仙府
         for (let i = 0; i < 5; i++) {
             const slot = document.getElementById(`ai-building-slot-${i}`);
@@ -1982,7 +2068,7 @@ class UIController {
 
             // 五行阵仙：相同元素的牌也会高亮
             const isSameElement = cardElement === selectedElement;
-            const isArrayMaster = player && player.cultivation === CULTIVATION_TYPES.FIVE_ELEMENT_ARRAY_MASTER;
+            const isArrayMaster = player && player.cultivation === CULTIVATION_TYPES.FIVE_ELEMENT_ARRAY;
 
             if (hasGenerateRelation || (isArrayMaster && isSameElement)) {
                 card.classList.add('highlighted');
@@ -2015,9 +2101,16 @@ class UIController {
 
         const selectedElements = this.selectedCards.map(i => gameState.player.hand[i]);
 
-        // 检查是否都是相同元素
+        // 检查是否都是相同元素（只有五行阵仙可以使用相同元素的牌）
         if (selectedElements.every(element => element === selectedElements[0])) {
-            return true;
+            // 只有五行阵仙才能使用相同元素的牌进行攻击
+            if (gameState.player.cultivation === CULTIVATION_TYPES.FIVE_ELEMENT_ARRAY) {
+                return true;
+            } else if (selectedElements.length === 1) {
+                return true; // 单张牌任何职业都可以使用
+            } else {
+                return false; // 其他职业不能使用多张相同元素的牌
+            }
         }
 
         // 检查是否有相生关系（用于五行合攻）
@@ -2126,11 +2219,13 @@ class UIController {
         if (skillBtn) {
             const hasRegularSkill = gameState.player && gameState.player.skillPoints > 0 && !gameState.skillUsedThisTurn;
             const isBloodGuide = gameState.player && gameState.player.cultivation === CULTIVATION_TYPES.BLOOD_GUIDE_LORD;
+            const isSpiritThief = gameState.player && gameState.player.cultivation === CULTIVATION_TYPES.SPIRIT_THIEF;
             const sacrificeCount = gameState.sacrificeUsedCount || 0;
             const canSacrifice = isBloodGuide && gameState.player.energy >= 2 && sacrificeCount < 3 && !gameState.sacrificeCooldown;
 
+            // 窃灵天官不显示技能按钮（被动技能）
             skillBtn.classList.toggle('hidden',
-                !isPlayerTurn || !gameState.player || (!hasRegularSkill && !canSacrifice));
+                !isPlayerTurn || !gameState.player || isSpiritThief || (!hasRegularSkill && !canSacrifice));
 
             // 更新按钮文本和状态
             if (isBloodGuide && canSacrifice) {
@@ -2173,12 +2268,41 @@ class UIController {
         const attackBtn = document.getElementById('attack-btn');
         if (attackBtn) {
             const hasValidSelection = hasSelectedCards && this.isValidCardSelection();
-            attackBtn.disabled = !isPlayerTurn || !hasActionPoints || !hasValidSelection;
+            const hasTwoCards = this.selectedCards && this.selectedCards.length === 2;
+            const hasMoreThanTwoCards = this.selectedCards && this.selectedCards.length > 2;
 
-            if (hasSelectedCards && !hasValidSelection) {
+            // 检查两张牌是否有相生关系或者是五行阵仙的相同元素牌
+            let hasTwoCardsWithGeneration = false;
+            let hasTwoSameElementCards = false;
+            if (hasTwoCards) {
+                const card1 = gameState.player.hand[this.selectedCards[0]];
+                const card2 = gameState.player.hand[this.selectedCards[1]];
+                hasTwoCardsWithGeneration =
+                    ELEMENT_RELATIONS.GENERATE[card1] === card2 ||
+                    ELEMENT_RELATIONS.GENERATE[card2] === card1;
+                hasTwoSameElementCards = card1 === card2 && gameState.player.cultivation === CULTIVATION_TYPES.FIVE_ELEMENT_ARRAY;
+            }
+
+            // 只有选择超过两张牌时才禁用斗法按钮
+            attackBtn.disabled = !isPlayerTurn || !hasActionPoints || !hasValidSelection || hasMoreThanTwoCards;
+
+            if (hasMoreThanTwoCards) {
+                attackBtn.title = '选择了三张或以上牌时不能进行斗法';
+                attackBtn.style.backgroundColor = '#666';
+                attackBtn.style.color = '#999';
+            } else if (hasTwoCards && !hasTwoCardsWithGeneration && !hasTwoSameElementCards) {
+                attackBtn.title = '两张牌必须有相生关系才能进行斗法（五行阵仙可使用相同元素牌）';
+                attackBtn.style.backgroundColor = '#666';
+                attackBtn.style.color = '#999';
+                attackBtn.disabled = true;
+            } else if (hasSelectedCards && !hasValidSelection) {
                 attackBtn.title = '选择的牌无法进行有效攻击（需要相同元素或相生关系）';
+                attackBtn.style.backgroundColor = '';
+                attackBtn.style.color = '';
             } else {
                 attackBtn.title = '';
+                attackBtn.style.backgroundColor = '';
+                attackBtn.style.color = '';
             }
         }
 
@@ -2188,6 +2312,50 @@ class UIController {
         }
 
         // 结束回合按钮已移除，改为自动结束
+    }
+
+    updatePassiveProgress() {
+        // 更新玩家被动技能进度
+        this.updatePlayerPassiveProgress(gameState.player, 'player-passive-progress');
+
+        // 更新AI被动技能进度
+        this.updatePlayerPassiveProgress(gameState.ai, 'ai-passive-progress');
+    }
+
+    updatePlayerPassiveProgress(player, elementId) {
+        const progressEl = document.getElementById(elementId);
+        if (!progressEl || !player) return;
+
+        const cultivation = CULTIVATION_EFFECTS[player.cultivation];
+        let progressText = '';
+
+        // 窃灵天官被动进度
+        if (cultivation.specialAbility === 'steal_card_passive') {
+            const progress = player.passiveCounters.stealCard || 0;
+            progressText = `窃灵进度: ${progress}/4`;
+        }
+
+        // 罡盾卫道者被动进度
+        else if (cultivation.specialAbility === 'shield_passive') {
+            if (player.shields <= 2) {
+                const progress = player.passiveCounters.shieldGeneration || 0;
+                progressText = `罡盾进度: ${progress}/3`;
+            } else {
+                progressText = `罡盾已满`;
+            }
+        }
+
+        // 记仇AI进度
+        if (player === gameState.ai && player.aiPersonality === AI_PERSONALITIES.VENGEFUL && player.vengefulCountdown > 0) {
+            progressText += (progressText ? ' | ' : '') + `记仇: ${player.vengefulCountdown}回合`;
+        }
+
+        if (progressText) {
+            progressEl.textContent = progressText;
+            progressEl.classList.remove('hidden');
+        } else {
+            progressEl.classList.add('hidden');
+        }
     }
 
     // 回合制战斗逻辑
@@ -2239,6 +2407,99 @@ class UIController {
                 gameState.addToLog(`${player === gameState.player ? '玩家' : 'AI'}的灵炁汲引坛效果触发，自动抽取1张牌`);
             }
         }
+
+        // 应用被动技能效果
+        this.applyPassiveSkillEffects(player);
+
+        // 应用青华灵泉殿治疗效果
+        this.applyQinghuaHealingEffect(player);
+    }
+
+    applyPassiveSkillEffects(player) {
+        const cultivation = CULTIVATION_EFFECTS[player.cultivation];
+
+        // 窃灵天官被动技能
+        if (cultivation.specialAbility === 'steal_card_passive') {
+            if (!player.passiveCounters.stealCard) {
+                player.passiveCounters.stealCard = 0;
+            }
+            player.passiveCounters.stealCard++;
+
+            if (player.passiveCounters.stealCard >= 4) {
+                player.passiveCounters.stealCard = 0;
+                this.executePassiveStealSkill(player);
+            }
+        }
+
+        // 罡盾卫道者被动技能
+        if (cultivation.specialAbility === 'shield_passive') {
+            if (!player.passiveCounters.shieldGeneration) {
+                player.passiveCounters.shieldGeneration = 0;
+            }
+
+            // 只有在罡盾小于等于2时才计数
+            if (player.shields <= 2) {
+                player.passiveCounters.shieldGeneration++;
+
+                if (player.passiveCounters.shieldGeneration >= 3) {
+                    player.passiveCounters.shieldGeneration = 0;
+
+                    // 增加一层罡盾，但不超过3层
+                    if (player.shields < 3) {
+                        player.shields++;
+                        const playerName = player === gameState.player ? '玩家' : 'AI';
+                        gameState.addToLog(`${playerName}的罡盾被动技能触发，获得1层罡盾，当前罡盾：${player.shields}层`);
+                        soundManager.playSound('skill');
+                    }
+                }
+            }
+        }
+    }
+
+    executePassiveStealSkill(player) {
+        const target = player === gameState.player ? gameState.ai : gameState.player;
+
+        if (target.hand.length === 0) return;
+
+        // 随机窃取目标一张牌
+        const stolenIndex = Math.floor(Math.random() * target.hand.length);
+        const stolenCard = target.hand.splice(stolenIndex, 1)[0];
+
+        if (player.hand.length < player.handLimit) {
+            player.hand.push(stolenCard);
+        } else {
+            gameState.discardPile.push(stolenCard);
+        }
+
+        const playerName = player === gameState.player ? '玩家' : 'AI';
+        const targetName = target === gameState.player ? '玩家' : 'AI';
+        gameState.addToLog(`${playerName}的窃灵被动技能触发，获得了${targetName}的一张${ELEMENT_INFO[stolenCard].name}牌`);
+        soundManager.playSound('skill');
+    }
+
+    applyQinghuaHealingEffect(player) {
+        const qinghuaBuildings = player.buildings.filter(b => b.type === BUILDING_TYPES.QINGHUA_SPRING_HALL);
+
+        qinghuaBuildings.forEach((building, index) => {
+            const counterId = `qinghua_${index}`;
+            if (!player.buildingCounters[counterId]) {
+                player.buildingCounters[counterId] = 0;
+            }
+
+            player.buildingCounters[counterId]++;
+
+            if (player.buildingCounters[counterId] >= 3) {
+                player.buildingCounters[counterId] = 0;
+
+                // 只有在未满血时才恢复
+                if (player.energy < player.maxEnergy) {
+                    player.energy = Math.min(player.maxEnergy, player.energy + 1);
+                    const playerName = player === gameState.player ? '玩家' : 'AI';
+                    gameState.addToLog(`${playerName}的青华灵泉殿效果触发，恢复1点仙元`);
+                    soundManager.playSound('heal');
+                }
+            }
+        });
     }
 
     handleStarObservatoryEffect() {
@@ -2324,9 +2585,19 @@ class UIController {
         if (gameState.actionPoints <= 0) return;
 
         const player = gameState.player;
+        const currentTime = Date.now();
+
+        // 检查天机衍道宫的行动点使用间隔
+        if (player.buildings.some(b => b.type === BUILDING_TYPES.HEAVENLY_MECHANISM_PALACE)) {
+            if (currentTime - player.lastActionTime < 300) { // 0.3秒间隔
+                alert('请等待0.3秒后再使用下一个行动点');
+                return;
+            }
+        }
 
         player.drawCards(1, gameState, true); // 允许超过手牌上限
         gameState.actionPoints--;
+        player.lastActionTime = currentTime; // 更新上次行动时间
         gameState.addToLog('玩家引灵，抽取1张牌');
 
         soundManager.playSound('cardDraw');
@@ -2359,6 +2630,7 @@ class UIController {
         this.handleAIDefense(attackCards, damageInfo, gameState.player);
 
         gameState.actionPoints--;
+        gameState.player.lastActionTime = Date.now(); // 更新上次行动时间
         this.updateUI();
 
         // 检查是否还有行动点
@@ -2390,9 +2662,25 @@ class UIController {
             }
         }
 
+        // 五行阵仙特殊被动：2张相同属性牌等同于"原属性+生该属性"
+        if (!isWuxingAttack && attacker.cultivation === CULTIVATION_TYPES.FIVE_ELEMENT_ARRAY) {
+            for (const [element, count] of Object.entries(elementCounts)) {
+                if (count >= 2) {
+                    const generatedElement = ELEMENT_RELATIONS.GENERATE[element];
+                    if (generatedElement) {
+                        baseDamage += 2; // 五行阵仙特殊攻击
+                        isWuxingAttack = true;
+                        effectiveElement = generatedElement;
+                        gameState.addToLog(`五行阵仙特殊被动触发！2张${ELEMENT_INFO[element].name}牌等同于${ELEMENT_INFO[element].name}+${ELEMENT_INFO[generatedElement].name}`);
+                        break;
+                    }
+                }
+            }
+        }
+
         // 如果没有五行合攻，计算普通伤害
         if (baseDamage === 0) {
-            baseDamage = cards.length;
+            baseDamage = cards.length; // 基础伤害：每张牌1点
         }
 
         return { baseDamage, isWuxingAttack, effectiveElement, cards };
@@ -2422,7 +2710,7 @@ class UIController {
 
             // 元素御仙加成（只对被生成的元素有效）
             if (attacker.selectedElement === effectiveElement) {
-                totalDamage += 1;
+                totalDamage += 2;
             }
 
             gameState.addToLog(`五行合攻！只有${ELEMENT_INFO[effectiveElement].name}元素的加成生效`);
@@ -2440,7 +2728,7 @@ class UIController {
 
                 // 元素御仙加成
                 if (attacker.selectedElement === card) {
-                    totalDamage += 1;
+                    totalDamage += 2;
                 }
             });
         }
@@ -2495,6 +2783,12 @@ class UIController {
                 aiInfo.classList.add('damage-flash');
                 setTimeout(() => aiInfo.classList.remove('damage-flash'), 500);
             }
+
+            // 触发记仇AI的记仇状态
+            if (ai.aiPersonality === AI_PERSONALITIES.VENGEFUL) {
+                ai.vengefulCountdown = 3;
+                gameState.addToLog('AI进入记仇状态，接下来3回合将优先攻击！');
+            }
         } else if (finalBaseDamage <= 0) {
             gameState.addToLog(`AI完全防御了攻击，伤害加成无效`);
         }
@@ -2517,8 +2811,16 @@ class UIController {
             if (gameState.aiTurnCount > 10) {
                 console.warn('AI回合次数过多，强制结束回合');
                 gameState.aiTurnCount = 0;
+                gameState.inDefenseMode = false; // 清除防御模式
                 this.endTurn();
                 return;
+            }
+
+            // 检查是否在防御模式下卡住
+            if (gameState.inDefenseMode && gameState.aiTurnCount > 3) {
+                console.warn('AI在防御模式下卡住，强制清除防御模式');
+                gameState.inDefenseMode = false;
+                this.hideModal();
             }
 
             // 添加调试信息
@@ -2562,74 +2864,15 @@ class UIController {
                 const handRatio = ai.hand.length / ai.handLimit;
                 const playerHandRatio = gameState.player.hand.length / gameState.player.handLimit;
 
-                // 基础抽牌概率：手牌越多，抽牌概率越小
-                let drawProbability = Math.max(0.1, 1 - handRatio);
+                // 基础抽牌概率：手牌越多，抽牌概率越小，减少AI攻击欲望
+                let drawProbability = Math.max(0.4, 1 - handRatio * 0.6); // 提高基础抽牌概率
 
-                // 根据玩家手牌数量调整攻击欲望：玩家手牌越少，AI越倾向于攻击
-                const aggressionBonus = Math.max(0, (1 - playerHandRatio) * 0.4); // 最多增加40%攻击倾向
-                drawProbability = Math.max(0.05, drawProbability - aggressionBonus);
+                // 减少根据玩家手牌数量的攻击欲望调整
+                const aggressionBonus = Math.max(0, (1 - playerHandRatio) * 0.2); // 减少攻击倾向加成
+                drawProbability = Math.max(0.3, drawProbability - aggressionBonus); // 提高最低抽牌概率
 
-                if (ai.hand.length >= ai.handLimit) {
-                    // 手牌已满，只能攻击
-                    console.log('AI手牌已满，必须攻击');
-                    if (ai.hand.length > 0) {
-                        const attackCards = this.getAIBestAttackCombination(ai);
-                        if (attackCards.length > 0) {
-                            const damageInfo = this.calculateDamage(attackCards, ai);
-
-                            // 移除使用的卡牌
-                            attackCards.forEach(card => {
-                                const index = ai.hand.indexOf(card);
-                                if (index !== -1) {
-                                    ai.discardCard(index, gameState);
-                                }
-                            });
-
-                            gameState.addToLog(`AI发动攻击，使用${attackCards.map(c => ELEMENT_INFO[c].name).join('、')}`);
-                            soundManager.playSound('attack');
-
-                            // 添加到打出的牌区域
-                            this.addPlayedCards(attackCards, 'AI');
-
-                            this.handlePlayerDefense(attackCards, damageInfo, ai);
-                            gameState.actionPoints--;
-                            actionExecuted = true;
-                        }
-                    }
-                } else if (ai.hand.length === 0 || Math.random() < drawProbability) {
-                    // 没有手牌或随机决定抽牌
-                    console.log('AI决定抽牌，概率:', drawProbability);
-                    ai.drawCards(1, gameState);
-                    gameState.actionPoints--;
-                    gameState.addToLog('AI引灵，抽取1张牌');
-                    soundManager.playSound('cardDraw');
-                    actionExecuted = true;
-                } else {
-                    // 攻击
-                    console.log('AI决定攻击');
-                    const attackCards = this.getAIBestAttackCombination(ai);
-                    if (attackCards.length > 0) {
-                        const damageInfo = this.calculateDamage(attackCards, ai);
-
-                        // 移除使用的卡牌
-                        attackCards.forEach(card => {
-                            const index = ai.hand.indexOf(card);
-                            if (index !== -1) {
-                                ai.discardCard(index, gameState);
-                            }
-                        });
-
-                        gameState.addToLog(`AI发动攻击，使用${attackCards.map(c => ELEMENT_INFO[c].name).join('、')}`);
-                        soundManager.playSound('attack');
-
-                        // 添加到打出的牌区域
-                        this.addPlayedCards(attackCards, 'AI');
-
-                        this.handlePlayerDefense(attackCards, damageInfo, ai);
-                        gameState.actionPoints--;
-                        actionExecuted = true;
-                    }
-                }
+                // 根据AI性格决定行为
+                actionExecuted = this.executeAIPersonalityBehavior(ai, drawProbability);
             }
 
             this.updateUI();
@@ -2638,21 +2881,22 @@ class UIController {
 
             // 只有在执行了行动后才检查是否继续
             if (actionExecuted) {
+                // AI使用完一个行动点后增加1秒冷却
+                ai.aiActionCooldown = Date.now() + 1000;
+
                 // 检查是否还有行动点
                 if (gameState.actionPoints <= 0) {
                     console.log('AI行动点用完，结束回合');
-                    setTimeout(() => this.endTurn(), 300); // 进一步减少延迟
+                    setTimeout(() => this.endTurn(), 300);
                 } else {
-                    // 如果还有行动点，继续AI回合，对于简单动作减少延迟
-                    console.log('AI还有行动点，继续回合');
-                    // 对于回元调息等不需要玩家交互的动作，延迟更短
-                    const delay = actionExecuted && !gameState.inDefenseMode ? 150 : 200;
-                    setTimeout(() => this.handleAITurn(), delay);
+                    // 如果还有行动点，等待冷却后继续AI回合
+                    console.log('AI还有行动点，等待1秒冷却后继续回合');
+                    setTimeout(() => this.handleAITurn(), 1000); // 1秒冷却
                 }
             } else {
                 // 如果没有执行任何行动，直接结束回合
                 console.log('AI没有执行任何行动，结束回合');
-                setTimeout(() => this.endTurn(), 300); // 进一步减少延迟
+                setTimeout(() => this.endTurn(), 300);
             }
         }, 300); // 进一步减少初始延迟
     }
@@ -2703,10 +2947,6 @@ class UIController {
         const cultivation = CULTIVATION_EFFECTS[ai.cultivation];
 
         switch (cultivation.specialAbility) {
-            case 'steal_card':
-                // 窃灵天官：70%概率使用技能
-                return Math.random() < 0.7;
-
             case 'mass_attack':
                 // 焚天修士：检测同属性牌数量，3张以上时概率递增
                 return this.shouldBurningSkyCultivatorUseSkill(ai);
@@ -2753,10 +2993,6 @@ class UIController {
         const cultivation = CULTIVATION_EFFECTS[ai.cultivation];
 
         switch (cultivation.specialAbility) {
-            case 'steal_card':
-                this.executeAIStealSkill(ai);
-                break;
-
             case 'mass_attack':
                 this.executeAIMassAttackSkill(ai);
                 break;
@@ -2843,6 +3079,260 @@ class UIController {
 
         gameState.addToLog(`AI使用献祭技能，消耗1点仙元，抽取2张牌`);
         soundManager.playSound('skill');
+    }
+
+    executeAIPersonalityBehavior(ai, drawProbability) {
+        console.log('AI性格:', ai.aiPersonality);
+
+        // 如果AI性格为空，随机分配一个
+        if (!ai.aiPersonality) {
+            const personalities = Object.values(AI_PERSONALITIES);
+            ai.aiPersonality = personalities[Math.floor(Math.random() * personalities.length)];
+            console.log('AI性格为空，随机分配:', ai.aiPersonality);
+        }
+
+        // 添加安全检查，确保AI不会卡住
+        try {
+            switch (ai.aiPersonality) {
+                case AI_PERSONALITIES.AGGRESSIVE:
+                    return this.executeAggressiveAI(ai, drawProbability);
+                case AI_PERSONALITIES.ELEMENT_FOCUSED:
+                    return this.executeElementFocusedAI(ai, drawProbability);
+                case AI_PERSONALITIES.ELEMENT_DIVERSE:
+                    return this.executeElementDiverseAI(ai, drawProbability);
+                case AI_PERSONALITIES.VENGEFUL:
+                    return this.executeVengefulAI(ai, drawProbability);
+                default:
+                    return this.executeBalancedAI(ai, drawProbability);
+            }
+        } catch (error) {
+            console.error('AI性格执行出错:', error);
+            // 出错时使用平衡型AI作为后备
+            return this.executeBalancedAI(ai, drawProbability);
+        }
+    }
+
+    executeBalancedAI(ai, drawProbability) {
+        // 平衡型AI逻辑，减少攻击欲望
+        if (ai.hand.length >= ai.handLimit) {
+            return this.executeAIAttack(ai, 'AI手牌已满，必须攻击');
+        } else if (ai.hand.length === 0) {
+            return this.executeAIDraw(ai, drawProbability);
+        } else {
+            // 提高抽牌概率，减少攻击欲望
+            const balancedDrawProbability = Math.max(0.5, drawProbability * 1.2);
+            if (Math.random() < balancedDrawProbability) {
+                return this.executeAIDraw(ai, balancedDrawProbability);
+            } else {
+                return this.executeAIAttack(ai, 'AI平衡型选择攻击');
+            }
+        }
+    }
+
+    executeAggressiveAI(ai, drawProbability) {
+        // 攻击型AI：手牌满时必选攻击，但整体攻击欲望减少
+        if (ai.hand.length >= ai.handLimit) {
+            return this.executeAIAttack(ai, 'AI手牌已满，攻击型性格必须攻击');
+        } else if (ai.hand.length === 0) {
+            return this.executeAIDraw(ai, drawProbability);
+        } else {
+            // 攻击型AI仍然倾向于攻击，但减少攻击欲望
+            const aggressiveDrawProbability = Math.max(0.3, drawProbability * 0.7); // 提高抽牌概率
+            if (Math.random() < aggressiveDrawProbability) {
+                return this.executeAIDraw(ai, aggressiveDrawProbability);
+            } else {
+                return this.executeAIAttack(ai, 'AI攻击型性格选择攻击');
+            }
+        }
+    }
+
+    executeElementFocusedAI(ai, drawProbability) {
+        // 元素专注型AI：选择重复最多的元素进行斗法
+        if (ai.hand.length >= ai.handLimit) {
+            return this.executeAIAttackWithMostFrequentElement(ai);
+        } else if (ai.hand.length === 0 || Math.random() < drawProbability) {
+            return this.executeAIDraw(ai, drawProbability);
+        } else {
+            return this.executeAIAttackWithMostFrequentElement(ai);
+        }
+    }
+
+    executeElementDiverseAI(ai, drawProbability) {
+        // 元素多样型AI：选择共同最少但不为零的元素进行斗法
+        if (ai.hand.length >= ai.handLimit) {
+            return this.executeAIAttackWithLeastFrequentElement(ai);
+        } else if (ai.hand.length === 0 || Math.random() < drawProbability) {
+            return this.executeAIDraw(ai, drawProbability);
+        } else {
+            return this.executeAIAttackWithLeastFrequentElement(ai);
+        }
+    }
+
+    executeVengefulAI(ai, drawProbability) {
+        // 记仇型AI：被攻击后连续3回合攻击，否则抽牌到手牌满，减少攻击欲望
+        if (ai.vengefulCountdown > 0) {
+            // 记仇状态，优先攻击但也有概率抽牌
+            ai.vengefulCountdown--;
+            if (ai.hand.length > 0) {
+                // 即使在记仇状态，也有20%概率抽牌
+                if (Math.random() < 0.2) {
+                    return this.executeAIDraw(ai, 1.0);
+                } else {
+                    return this.executeAIAttack(ai, `AI记仇状态攻击（剩余${ai.vengefulCountdown}回合）`);
+                }
+            } else {
+                return this.executeAIDraw(ai, 1.0); // 没牌就抽牌
+            }
+        } else {
+            // 非记仇状态，抽牌直到手牌满，并尝试建造
+            if (ai.hand.length < ai.handLimit) {
+                return this.executeAIDraw(ai, 1.0);
+            } else {
+                // 手牌满了，优先抽牌而不是攻击
+                const vengefulDrawProbability = 0.7; // 70%概率继续抽牌
+                if (Math.random() < vengefulDrawProbability) {
+                    return this.executeAIDraw(ai, 1.0);
+                } else {
+                    return this.executeAIAttack(ai, 'AI记仇型手牌满了，选择攻击');
+                }
+            }
+        }
+    }
+
+    executeAIAttack(ai, logMessage) {
+        console.log(logMessage);
+
+        // 检查AI是否有手牌
+        if (ai.hand.length === 0) {
+            console.log('AI没有手牌，改为抽牌');
+            return this.executeAIDraw(ai, 1.0);
+        }
+
+        const attackCards = this.getAIBestAttackCombination(ai);
+        if (attackCards.length > 0) {
+            const damageInfo = this.calculateDamage(attackCards, ai);
+
+            // 移除使用的卡牌
+            attackCards.forEach(card => {
+                const index = ai.hand.indexOf(card);
+                if (index !== -1) {
+                    ai.discardCard(index, gameState);
+                }
+            });
+
+            gameState.addToLog(`AI发动攻击，使用${attackCards.map(c => ELEMENT_INFO[c].name).join('、')}`);
+            soundManager.playSound('attack');
+
+            // 添加到打出的牌区域
+            this.addPlayedCards(attackCards, 'AI');
+
+            this.handlePlayerDefense(attackCards, damageInfo, ai);
+            gameState.actionPoints--;
+            return true;
+        } else {
+            // 没有有效攻击组合，改为抽牌
+            console.log('AI没有有效攻击组合，改为抽牌');
+            return this.executeAIDraw(ai, 1.0);
+        }
+    }
+
+    executeAIDraw(ai, probability) {
+        console.log('AI决定抽牌，概率:', probability);
+        ai.drawCards(1, gameState);
+        gameState.actionPoints--;
+        gameState.addToLog('AI引灵，抽取1张牌');
+        soundManager.playSound('cardDraw');
+        return true;
+    }
+
+    executeAIAttackWithMostFrequentElement(ai) {
+        // 找到手牌中最多的元素
+        const elementCounts = {};
+        ai.hand.forEach(card => {
+            elementCounts[card] = (elementCounts[card] || 0) + 1;
+        });
+
+        let mostFrequentElement = null;
+        let maxCount = 0;
+        Object.entries(elementCounts).forEach(([element, count]) => {
+            if (count > maxCount) {
+                maxCount = count;
+                mostFrequentElement = element;
+            }
+        });
+
+        if (mostFrequentElement && maxCount > 0) {
+            const attackCards = ai.hand.filter(card => card === mostFrequentElement);
+            if (attackCards.length > 0) {
+                const damageInfo = this.calculateDamage(attackCards, ai);
+
+                // 移除使用的卡牌
+                attackCards.forEach(card => {
+                    const index = ai.hand.indexOf(card);
+                    if (index !== -1) {
+                        ai.discardCard(index, gameState);
+                    }
+                });
+
+                gameState.addToLog(`AI元素专注型攻击，使用${attackCards.length}张${ELEMENT_INFO[mostFrequentElement].name}牌`);
+                soundManager.playSound('attack');
+
+                // 添加到打出的牌区域
+                this.addPlayedCards(attackCards, 'AI');
+
+                this.handlePlayerDefense(attackCards, damageInfo, ai);
+                gameState.actionPoints--;
+                return true;
+            }
+        }
+
+        // 没有找到合适的元素，改为抽牌
+        return this.executeAIDraw(ai, 1.0);
+    }
+
+    executeAIAttackWithLeastFrequentElement(ai) {
+        // 找到手牌中最少但不为零的元素
+        const elementCounts = {};
+        ai.hand.forEach(card => {
+            elementCounts[card] = (elementCounts[card] || 0) + 1;
+        });
+
+        let leastFrequentElement = null;
+        let minCount = Infinity;
+        Object.entries(elementCounts).forEach(([element, count]) => {
+            if (count > 0 && count < minCount) {
+                minCount = count;
+                leastFrequentElement = element;
+            }
+        });
+
+        if (leastFrequentElement && minCount > 0) {
+            const attackCards = ai.hand.filter(card => card === leastFrequentElement);
+            if (attackCards.length > 0) {
+                const damageInfo = this.calculateDamage(attackCards, ai);
+
+                // 移除使用的卡牌
+                attackCards.forEach(card => {
+                    const index = ai.hand.indexOf(card);
+                    if (index !== -1) {
+                        ai.discardCard(index, gameState);
+                    }
+                });
+
+                gameState.addToLog(`AI元素多样型攻击，使用${attackCards.length}张${ELEMENT_INFO[leastFrequentElement].name}牌`);
+                soundManager.playSound('attack');
+
+                // 添加到打出的牌区域
+                this.addPlayedCards(attackCards, 'AI');
+
+                this.handlePlayerDefense(attackCards, damageInfo, ai);
+                gameState.actionPoints--;
+                return true;
+            }
+        }
+
+        // 没有找到合适的元素，改为抽牌
+        return this.executeAIDraw(ai, 1.0);
     }
 
     handlePlayerDefense(attackCards, damageInfo, attacker) {
@@ -2936,12 +3426,23 @@ class UIController {
         // 检查是否有D元素
         const hasElementD = elementD && gameState.player.hand.includes(elementD);
 
+        // 五行阵仙特殊检查：拥有克制攻击的牌两张或以上时弹出高级防御选项
+        const isArrayMaster = gameState.player.cultivation === CULTIVATION_TYPES.FIVE_ELEMENT_ARRAY;
+        const counterElementCount = gameState.player.hand.filter(card => card === elementC).length;
+
         if (hasElementC && hasElementD) {
             // 有C和D元素，提供高级防御选项
             this.showAdvancedDefenseModal(attackCards, damageInfo, elementC, elementD, attacker, targetElement);
+        } else if (hasElementC && isArrayMaster && counterElementCount >= 2) {
+            // 五行阵仙拥有两张或以上克制牌，提供高级防御选项
+            this.showAdvancedDefenseModal(attackCards, damageInfo, elementC, null, attacker, targetElement);
         } else if (hasElementC) {
             // 只有C元素，提供普通防御选项
             this.showDefenseModal(attackCards, damageInfo, elementC, attacker);
+        } else {
+            // 没有防御牌，直接受到伤害
+            gameState.addToLog('你没有可以防御的卡牌');
+            this.applyDamageToPlayer(damageInfo, attacker);
         }
     }
 
@@ -3137,6 +3638,15 @@ class UIController {
             }
         }
 
+        // 检查青华灵泉殿的特殊限制
+        if (buildingType === BUILDING_TYPES.QINGHUA_SPRING_HALL) {
+            const existingCount = gameState.player.buildings.filter(b => b.type === buildingType).length;
+            if (existingCount >= 2) {
+                alert('建造的太多了！青华灵泉殿最多只能建造2个。');
+                return;
+            }
+        }
+
         if (confirm(`确定要建造${building.name}吗？\n成本：${costText}\n效果：${building.description}`)) {
             if (gameState.player.buildBuilding(buildingType, gameState)) {
                 gameState.actionPoints--;
@@ -3172,7 +3682,9 @@ class UIController {
                 this.startTurn();
             });
         } else {
+            // AI回合结束，切换到玩家，并增加回合数
             gameState.currentTurn = 'player';
+            gameState.roundNumber++; // 一个完整回合结束（玩家+AI）
             this.clearCardSelection();
             this.startTurn();
         }
@@ -3358,9 +3870,6 @@ class UIController {
         }
 
         switch (cultivation.specialAbility) {
-            case 'steal_card':
-                this.useStealCardSkill();
-                break;
             case 'mass_attack':
                 this.showMassAttackSkill();
                 break;
@@ -3425,35 +3934,7 @@ class UIController {
         }, 300);
     }
 
-    useStealCardSkill() {
-        const player = gameState.player;
-        const ai = gameState.ai;
 
-        if (player.skillPoints <= 0 || ai.hand.length === 0) {
-            alert('无法使用窃灵技能');
-            return;
-        }
-
-        // 随机窃取AI一张牌
-        const stolenIndex = Math.floor(Math.random() * ai.hand.length);
-        const stolenCard = ai.hand.splice(stolenIndex, 1)[0];
-
-        if (player.hand.length < player.handLimit) {
-            player.hand.push(stolenCard);
-        } else {
-            gameState.discardPile.push(stolenCard);
-        }
-
-        player.skillPoints--;
-        gameState.skillUsedThisTurn = true; // 标记本回合已使用技能
-        gameState.addToLog(`玩家使用窃灵技能，获得了AI的一张${ELEMENT_INFO[stolenCard].name}牌`);
-        soundManager.playSound('skill');
-
-        this.updateUI();
-
-        // 每回合只能使用一个技能，直接进入行动阶段
-        this.updateActionButtons();
-    }
 
     showMassAttackSkill() {
         const elementButtons = Object.values(ELEMENTS).map(element =>
@@ -3562,6 +4043,8 @@ class UIController {
         this.updateActionButtons();
     }
 
+
+
     endGame(winner) {
         gameState.addToLog(`游戏结束！${winner === 'player' ? '玩家' : 'AI'}获胜！`);
 
@@ -3649,6 +4132,9 @@ class UIController {
         // 设置防御模式标记，防止在防御选择期间结束回合
         gameState.inDefenseMode = true;
 
+        // 阻止页面其他点击事件
+        document.body.style.pointerEvents = 'none';
+
         const content = `
             <h3>对手攻击</h3>
             <p>对手使用${attackCards.map(c => ELEMENT_INFO[c].name).join('、')}攻击</p>
@@ -3682,6 +4168,9 @@ class UIController {
     showAdvancedDefenseModal(attackCards, damageInfo, elementC, elementD, attacker, targetElement) {
         // 设置防御模式标记，防止在防御选择期间结束回合
         gameState.inDefenseMode = true;
+
+        // 阻止页面其他点击事件
+        document.body.style.pointerEvents = 'none';
 
         const content = `
             <h3>对手五行合攻</h3>
@@ -3826,6 +4315,8 @@ class UIController {
 
     hideModal() {
         document.getElementById('modal-overlay').classList.add('hidden');
+        gameState.inDefenseMode = false; // 清除防御模式标记
+        document.body.style.pointerEvents = 'auto'; // 恢复页面点击事件
     }
 
     restartGame() {
